@@ -29,6 +29,7 @@
 package edu.berkeley.cs.jqf.fuzz.util;
 
 import java.util.ArrayList;
+import java.util.Arrays;
 import java.util.Collection;
 
 import edu.berkeley.cs.jqf.instrument.tracing.events.BranchEvent;
@@ -88,7 +89,7 @@ public class Coverage implements TraceEventVisitor {
 
     @Override
     public void visitBranchEvent(BranchEvent b) {
-        counter.increment(b.getIid() * 31 + b.getArm());
+        counter.increment1(b.getIid(), b.getArm());
     }
 
     @Override
@@ -114,7 +115,7 @@ public class Coverage implements TraceEventVisitor {
         return counter.getNonZeroIndices();
     }
 
-
+    /** Returns a set of edges in this coverage that don't exist in baseline */
     public Collection<?> computeNewCoverage(Coverage baseline) {
         Collection<Integer> newCoverage = new ArrayList<>();
         for (int idx : this.counter.getNonZeroIndices()) {
@@ -125,8 +126,6 @@ public class Coverage implements TraceEventVisitor {
         return newCoverage;
 
     }
-
-
 
     /**
      * Clears the coverage map.
@@ -189,5 +188,15 @@ public class Coverage implements TraceEventVisitor {
         return changed;
     }
 
+    /** Returns a hash code of the edge counts in the coverage map. */
+    @Override
+    public int hashCode() {
+        return Arrays.hashCode(counter.counts);
+    }
+
+    /** Returns a hash code of the list of edges that have been covered at least once. */
+    public int nonZeroHashCode() {
+        return counter.getNonZeroIndices().hashCode();
+    }
 
 }

@@ -28,29 +28,31 @@
  */
 package edu.berkeley.cs.jqf.fuzz.ei;
 
+import java.io.IOException;
+import java.nio.file.Files;
 import java.util.ArrayList;
 import java.util.Arrays;
 import java.util.HashMap;
 import java.util.Map;
 import java.util.Random;
 
-import edu.berkeley.cs.jqf.fuzz.ei.ExecutionIndexingGuidance.Input;
 import edu.berkeley.cs.jqf.fuzz.ei.ExecutionIndexingGuidance.InputLocation;
+import edu.berkeley.cs.jqf.fuzz.ei.ExecutionIndexingGuidance.MappedInput;
 import org.junit.Before;
 import org.junit.Test;
 import org.junit.runner.RunWith;
 import org.mockito.Mockito;
 import org.mockito.junit.MockitoJUnitRunner;
 
-import static org.junit.Assert.assertEquals;
-import static org.junit.Assert.assertNotEquals;
-import static org.junit.Assert.assertNull;
-import static org.mockito.Mockito.*;
+import static org.junit.Assert.*;
+import static org.mockito.Mockito.anyInt;
+import static org.mockito.Mockito.when;
 
 @RunWith(MockitoJUnitRunner.class)
 public class ExecutionIndexingGuidanceTest {
 
     private static Random r;
+    private ExecutionIndexingGuidance g;
 
     private ExecutionIndex e1 = new ExecutionIndex(new int[]{1,1});
     private ExecutionIndex e2 = new ExecutionIndex(new int[]{1,1,3,4}); // Same EC as e4/e6
@@ -66,9 +68,14 @@ public class ExecutionIndexingGuidanceTest {
         r = new Random(42);
     }
 
+    @Before
+    public void createGuidanceInstance() throws IOException {
+       g = new ExecutionIndexingGuidance("test", null, Files.createTempDirectory("fuzz-out").toFile());
+    }
+
     @Test
     public void testGetOrFresh() {
-        Input input = new Input();
+        MappedInput input = g.new MappedInput();
         int k1a = input.getOrGenerateFresh(e1, r);
         int k1b = input.getOrGenerateFresh(e1, r);
         assertEquals(k1a, k1b);
@@ -83,14 +90,14 @@ public class ExecutionIndexingGuidanceTest {
 
     @Test
     public void testClone() {
-        Input input = new Input();
+        MappedInput input = g.new MappedInput();
         int k1 = input.getOrGenerateFresh(e1, r);
         int k2 = input.getOrGenerateFresh(e2, r);
         int k3 = input.getOrGenerateFresh(e3, r);
         int k4 = input.getOrGenerateFresh(e4, r);
         int k5 = input.getOrGenerateFresh(e5, r);
 
-        Input clone = new Input(input);
+        MappedInput clone = g.new MappedInput(input);
         assertEquals(k1, clone.getOrGenerateFresh(e1, r));
         assertEquals(k2, clone.getOrGenerateFresh(e2, r));
         assertEquals(k3, clone.getOrGenerateFresh(e3, r));
@@ -102,14 +109,14 @@ public class ExecutionIndexingGuidanceTest {
 
     @Test
     public void testGc() {
-        Input input = new Input();
+        MappedInput input = g.new MappedInput();
         int k1 = input.getOrGenerateFresh(e1, r);
         int k2 = input.getOrGenerateFresh(e2, r);
         int k3 = input.getOrGenerateFresh(e3, r);
         int k4 = input.getOrGenerateFresh(e4, r);
         int k5 = input.getOrGenerateFresh(e5, r);
 
-        Input clone = new Input(input);
+        MappedInput clone = g.new MappedInput(input);
         assertEquals(k1, clone.getOrGenerateFresh(e1, r));
         assertEquals(k5, clone.getOrGenerateFresh(e5, r));
         assertEquals(k2, clone.getOrGenerateFresh(e2, r));
@@ -133,15 +140,15 @@ public class ExecutionIndexingGuidanceTest {
 
 
     //@Test - argh: we cannot configure static properties for tests
-    // (need to change how config is handled in ExecutionIndexingGuidance)
+    // (need to change how config is handled in ZestGuidance)
     public void testSplice() {
-        Input srcInput = new Input();
+        MappedInput srcInput = g.new MappedInput();
         srcInput.setValueAtKey(e1, 23);
         srcInput.setValueAtKey(e2, 46);
         srcInput.setValueAtKey(e3, 69);
         srcInput.setValueAtKey(e4, 92);
 
-        Input baseInput = new Input();
+        MappedInput baseInput = g.new MappedInput();
         baseInput.setValueAtKey(e3, 12);
         baseInput.setValueAtKey(e4, 24);
         baseInput.setValueAtKey(e5, 36);
@@ -177,7 +184,7 @@ public class ExecutionIndexingGuidanceTest {
                 .thenReturn(1)   // Pick target offset as e4
                 .thenReturn(0);  // Pick first input location
 
-        Input fuzzedInput = baseInput.fuzz(mockRandom, ecToInputLoc);
+        MappedInput fuzzedInput = baseInput.fuzz(mockRandom, ecToInputLoc);
 
         assertEquals(12, fuzzedInput.getOrGenerateFresh(e3, r));
         assertEquals(46, fuzzedInput.getOrGenerateFresh(e4, r));

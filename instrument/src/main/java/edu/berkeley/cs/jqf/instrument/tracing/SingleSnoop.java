@@ -60,14 +60,14 @@ public final class SingleSnoop {
         }
     };
 
-    static final Map<Thread, String> entryPoints = new WeakHashMap<>();
+    public static final Map<Thread, String> entryPoints = new WeakHashMap<>();
 
 
     /** A supplier of callbacks for each thread (does nothing by default). */
     static Function<Thread, Consumer<TraceEvent>> callbackGenerator = (t) -> (e) -> {};
 
 
-    private static TraceLogger intp = new TraceLogger();
+    private static final TraceLogger intp = TraceLogger.get();
 
     private SingleSnoop() {}
 

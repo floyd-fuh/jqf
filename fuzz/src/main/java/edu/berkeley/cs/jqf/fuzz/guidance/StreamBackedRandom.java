@@ -29,6 +29,7 @@
 
 package edu.berkeley.cs.jqf.fuzz.guidance;
 
+import java.io.EOFException;
 import java.io.IOException;
 import java.io.InputStream;
 import java.nio.ByteBuffer;
@@ -134,7 +135,7 @@ public class StreamBackedRandom extends Random {
                 String message = String.format("EOF reached; total bytes read = %d, " +
                                 "last read got %d of %d bytes",
                         totalBytesRead, actualBytesRead, maxBytesToRead);
-                throw new IllegalStateException(message);
+                throw new IllegalStateException(new EOFException(message));
 
             }
 

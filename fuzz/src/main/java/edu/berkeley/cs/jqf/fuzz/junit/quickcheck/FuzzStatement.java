@@ -28,6 +28,7 @@
  */
 package edu.berkeley.cs.jqf.fuzz.junit.quickcheck;
 
+import java.io.EOFException;
 import java.io.File;
 import java.lang.reflect.Executable;
 import java.lang.reflect.Parameter;
@@ -138,11 +139,18 @@ public class FuzzStatement extends Statement {
                         args = generators.stream()
                                 .map(g -> g.generate(random, genStatus))
                                 .toArray();
+
+                        // Let guidance observe the generated input args
+                        guidance.observeGeneratedArgs(args);
                     } catch (IllegalStateException e) {
-                        // This happens when we reach EOF before reading all the random values.
-                        // Treat this as an assumption failure, so that the guidance considers the
-                        // generated input as INVALID
-                        throw new AssumptionViolatedException("StreamBackedRandom does not have enough data", e);
+                        if (e.getCause() instanceof EOFException) {
+                            // This happens when we reach EOF before reading all the random values.
+                            // Treat this as an assumption failure, so that the guidance considers the
+                            // generated input as INVALID
+                            throw new AssumptionViolatedException("StreamBackedRandom does not have enough data", e.getCause());
+                        } else {
+                            throw e;
+                        }
                     } catch (AssumptionViolatedException e) {
                         // Propagate assumption violations out
                         throw e;
@@ -180,10 +188,10 @@ public class FuzzStatement extends Statement {
                         error = e;
                         failures.add(e);
                     }
-                } finally {
-                    // Inform guidance about the outcome of this trial
-                    guidance.handleResult(result, error);
                 }
+
+                // Inform guidance about the outcome of this trial
+                guidance.handleResult(result, error);
 
 
             }

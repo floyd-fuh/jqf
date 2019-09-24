@@ -1,5 +1,5 @@
 /*
- * Copyright (c) 2018, The Regents of the University of California
+ * Copyright (c) 2019, The Regents of the University of California
  *
  * All rights reserved.
  *
@@ -26,29 +26,44 @@
  * (INCLUDING NEGLIGENCE OR OTHERWISE) ARISING IN ANY WAY OUT OF THE USE
  * OF THIS SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
  */
-package edu.berkeley.cs.jqf.examples.tika;
-
-import java.io.IOException;
-import java.io.InputStream;
-import java.io.Reader;
+package edu.berkeley.cs.jqf.examples;
 
 import com.pholser.junit.quickcheck.From;
-import edu.berkeley.cs.jqf.fuzz.junit.quickcheck.InputStreamGenerator;
+import edu.berkeley.cs.jqf.examples.common.AsciiStringGenerator;
 import edu.berkeley.cs.jqf.fuzz.Fuzz;
 import edu.berkeley.cs.jqf.fuzz.JQF;
-import org.apache.tika.Tika;
 import org.junit.runner.RunWith;
+import static org.junit.Assert.*;
 
 @RunWith(JQF.class)
-public class TikaParserTest {
+public class RobustnessTest {
+    @Fuzz
+    public void testTwo(@From(AsciiStringGenerator.class) String s1, @From(AsciiStringGenerator.class) String s2) {
+        if (s2.length() == 3) {
+            if (s2.charAt(0) == 'a') {
+                if (s2.charAt(1) == 'b') {
+                    if (s2.charAt(2) == 'c') {
+                        if (s1.length() == 3) {
+                            if (s1.charAt(0) == 'a') {
+                                if (s1.charAt(1) == 'b') {
+                                    if (s1.charAt(2) == 'c') {
+                                        assertTrue(false);
+                                    }
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+        }
+    }
 
     @Fuzz
-    public void fuzz(@From(InputStreamGenerator.class) InputStream in) throws IOException {
-        Tika tika = new Tika();
-        try(Reader reader = tika.parse(in)) {
-            char[] buf = new char[1024];
-            while (reader.read(buf) != -1); // Keep reading until EOF
-        }
-
+    public void debugTwo(@From(AsciiStringGenerator.class) String s1, @From(AsciiStringGenerator.class) String s2) {
+        System.out.print(s2.length() + ": ");
+        System.out.println(s2);
+        System.out.print(s1.length() + ": ");
+        System.out.println(s1);
     }
+
 }

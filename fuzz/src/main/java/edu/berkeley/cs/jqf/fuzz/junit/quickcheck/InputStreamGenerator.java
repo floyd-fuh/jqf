@@ -26,33 +26,55 @@
  * (INCLUDING NEGLIGENCE OR OTHERWISE) ARISING IN ANY WAY OUT OF THE USE
  * OF THIS SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
  */
-package edu.berkeley.cs.jqf.examples.imageio;
+package edu.berkeley.cs.jqf.fuzz.junit.quickcheck;
 
-import javax.imageio.ImageIO;
-import javax.imageio.stream.ImageInputStream;
+import java.io.EOFException;
 import java.io.IOException;
+import java.io.InputStream;
 
 import com.pholser.junit.quickcheck.generator.GenerationStatus;
 import com.pholser.junit.quickcheck.generator.Generator;
 import com.pholser.junit.quickcheck.random.SourceOfRandomness;
-import edu.berkeley.cs.jqf.fuzz.junit.quickcheck.InputStreamGenerator;
 
 /**
+ * Lazy provider of bytes from an input stream. This is useful
+ * when you want the parameter sequence to be exactly equal to
+ * the raw input, such as when fuzzing with AFL.
+ *
+ * Use this only with AFL-like front-ends, which return
+ * bytes from a fixed-size file. This generator may not work
+ * properly with front-ends like Zest that generate fresh
+ * values at the end of a parameter sequence, since that would
+ * make the InputStream infinitely long.
+ *
  * @author Rohan Padhye
  */
-public class ImageInputStreamGenerator extends Generator<ImageInputStream> {
-
-    public ImageInputStreamGenerator() {
-        super(ImageInputStream.class);
+public class InputStreamGenerator extends Generator<InputStream> {
+    public InputStreamGenerator() {
+        super(InputStream.class);
     }
 
     @Override
-    public ImageInputStream generate(SourceOfRandomness random, GenerationStatus status) {
-        try {
-            // Create an image input stream from an input stream
-            return ImageIO.createImageInputStream(gen().make(InputStreamGenerator.class).generate(random, status));
-        } catch (IOException e) {
-            throw new RuntimeException("I/O exceptions should not occur for byte arrays");
-        }
+    public InputStream generate(SourceOfRandomness sourceOfRandomness, GenerationStatus generationStatus) {
+        return new InputStream() {
+           @Override
+           public int read() throws IOException {
+               // Keep asking for new random bytes until the
+               // SourceOfRandomness runs out of parameters. This is designed
+               // to work with fixed-size parameter sequences, such as when
+               // fuzzing with AFL.
+               try {
+                   byte nextByte = sourceOfRandomness.nextByte(Byte.MIN_VALUE, Byte.MAX_VALUE);
+                   int nextInt = nextByte & 0xFF;
+                   return nextInt;
+               } catch (IllegalStateException e) {
+                   if (e.getCause() instanceof EOFException) {
+                       return -1;
+                   } else {
+                       throw e;
+                   }
+               }
+           }
+       };
     }
 }

@@ -36,8 +36,7 @@ import java.time.Duration;
 import java.time.format.DateTimeParseException;
 import java.util.List;
 
-import edu.berkeley.cs.jqf.fuzz.ei.ExecutionIndexingGuidance;
-import edu.berkeley.cs.jqf.fuzz.guidance.Guidance;
+import edu.berkeley.cs.jqf.fuzz.ei.ZestGuidance;
 import edu.berkeley.cs.jqf.fuzz.junit.GuidedFuzzing;
 import edu.berkeley.cs.jqf.instrument.InstrumentingClassLoader;
 import org.apache.maven.artifact.DependencyResolutionRequiredException;
@@ -130,6 +129,20 @@ public class FuzzGoal extends AbstractMojo {
     private String time;
 
     /**
+     * Whether to generate inputs blindly without taking into
+     * account coverage feedback. Blind input generation is equivalent
+     * to running QuickCheck.
+     *
+     * <p>If this property is set to <tt>true</tt>, then the fuzzing
+     * algorithm does not maintain a queue. Every input is randomly
+     * generated from scratch. The program under test is still instrumented
+     * in order to provide coverage statistics. This mode is mainly useful
+     * for comparing coverage-guided fuzzing with plain-old QuickCheck. </p>
+     */
+    @Parameter(property="blind")
+    private boolean blind;
+
+    /**
      * The name of the output directory where fuzzing results will
      * be stored.
      *
@@ -142,10 +155,32 @@ public class FuzzGoal extends AbstractMojo {
     @Parameter(property="out")
     private String outputDirectory;
 
+    /**
+     * Weather to use libFuzzer like output instead of AFL like stats
+     * screen
+     *
+     * <p>If this property is set to <tt>true</>, then output will look like libFuzzer output
+     * https://llvm.org/docs/LibFuzzer.html#output
+     * .</p>
+     */
+    @Parameter(property="libFuzzerCompatOutput")
+    private String libFuzzerCompatOutput;
+  
+    /**
+     * Whether to stop fuzzing once a crash is found.
+     *
+     * <p>If this property is set to <tt>true</tt>, then the fuzzing
+     * will exit on first crash. Useful for continuous fuzzing when you dont wont to consume resource
+     * once a crash is found. Also fuzzing will be more effective once the crash is fixed.</p>
+     */
+    @Parameter(property="exitOnCrash")
+    private String exitOnCrash;
+
+
     @Override
     public void execute() throws MojoExecutionException, MojoFailureException {
         ClassLoader loader;
-        Guidance guidance;
+        ZestGuidance guidance;
         Log log = getLog();
         PrintStream out = System.out; // TODO: Re-route to logger from super.getLog()
         Result result;
@@ -156,6 +191,14 @@ public class FuzzGoal extends AbstractMojo {
         }
         if (includes != null) {
             System.setProperty("janala.includes", includes);
+        }
+
+        // Configure Zest Guidance
+        if (libFuzzerCompatOutput != null) {
+            System.setProperty("jqf.ei.LIBFUZZER_COMPAT_OUTPUT", libFuzzerCompatOutput);
+        }
+        if (exitOnCrash != null) {
+            System.setProperty("jqf.ei.EXIT_ON_CRASH", exitOnCrash);
         }
 
         Duration duration = null;
@@ -184,7 +227,8 @@ public class FuzzGoal extends AbstractMojo {
         try {
             File resultsDir = new File(target, outputDirectory);
             String targetName = testClassName + "#" + testMethod;
-            guidance = new ExecutionIndexingGuidance(targetName, duration, resultsDir);
+            guidance = new ZestGuidance(targetName, duration, resultsDir);
+            guidance.setBlind(blind);
         } catch (IOException e) {
             throw new MojoExecutionException("Could not create output directory", e);
         }

@@ -1,5 +1,5 @@
 /*
- * Copyright (c) 2017-2018 The Regents of the University of California
+ * Copyright (c) 2019, The Regents of the University of California
  *
  * All rights reserved.
  *
@@ -29,144 +29,41 @@
 package edu.berkeley.cs.jqf.fuzz.ei;
 
 import java.io.BufferedInputStream;
-import java.io.BufferedOutputStream;
-import java.io.Console;
 import java.io.File;
 import java.io.FileInputStream;
-import java.io.FileOutputStream;
-import java.io.FileWriter;
 import java.io.IOException;
 import java.io.InputStream;
-import java.io.PrintWriter;
 import java.time.Duration;
-import java.util.ArrayDeque;
 import java.util.ArrayList;
-import java.util.Arrays;
-import java.util.Collection;
-import java.util.Date;
-import java.util.Deque;
 import java.util.HashMap;
-import java.util.HashSet;
 import java.util.Iterator;
 import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Map;
 import java.util.Random;
 import java.util.Set;
-import java.util.concurrent.TimeUnit;
 import java.util.function.Consumer;
 
 import edu.berkeley.cs.jqf.fuzz.ei.ExecutionIndex.Prefix;
 import edu.berkeley.cs.jqf.fuzz.ei.ExecutionIndex.Suffix;
-import edu.berkeley.cs.jqf.fuzz.guidance.Guidance;
 import edu.berkeley.cs.jqf.fuzz.guidance.GuidanceException;
 import edu.berkeley.cs.jqf.fuzz.guidance.Result;
-import edu.berkeley.cs.jqf.fuzz.guidance.TimeoutException;
 import edu.berkeley.cs.jqf.fuzz.util.Coverage;
 import edu.berkeley.cs.jqf.fuzz.util.ProducerHashMap;
+import edu.berkeley.cs.jqf.instrument.tracing.SingleSnoop;
 import edu.berkeley.cs.jqf.instrument.tracing.events.CallEvent;
-import edu.berkeley.cs.jqf.instrument.tracing.events.ReturnEvent;
 import edu.berkeley.cs.jqf.instrument.tracing.events.TraceEvent;
-import edu.berkeley.cs.jqf.instrument.tracing.events.TraceEventVisitor;
-
-import static java.lang.Math.ceil;
-import static java.lang.Math.log;
 
 /**
- * A guidance that performs coverage-guided fuzz testing, where inputs
- * are represented not as sequences of bytes but instead as maps of
- * execution indexes to bytes.
- *
- * <p>Whenever the input generator for a test requests a new byte, the
- * execution index of that event is used to query a value in the input
- * map. This representation retains much more structure of the input
- * than a simple linear sequence.</p>
+ * A guidance that represents inputs as maps from
+ * execution indexes to parameters.
  *
  * @author Rohan Padhye
  */
-public class ExecutionIndexingGuidance implements Guidance, TraceEventVisitor {
-
-    // Currently, we only support single-threaded applications
-    // This field is used to ensure that
-    private Thread appThread;
-
-    /** The last event handled by this guidance */
-    private TraceEvent lastEvent;
+public class ExecutionIndexingGuidance extends ZestGuidance {
 
     /** The execution indexing logic. */
-    private ExecutionIndexingState eiState;
-
-    /** A pseudo-random number generator for generating fresh values. */
-    private Random random = new Random();
-
-    /** The name of the test for display purposes. */
-    private final String testName;
-
-    // ------------ ALGORITHM BOOKKEEPING ------------
-
-    /** The max amount of time to run for, in milli-seconds */
-    private final long maxDurationMillis;
-
-    /** The number of trials completed. */
-    private long numTrials = 0;
-
-    /** The number of valid inputs. */
-    private long numValid = 0;
-
-    /** The directory where fuzzing results are written. */
-    private final File outputDirectory;
-
-    /** The directory where saved inputs are written. */
-    private File savedInputsDirectory;
-
-    /** The directory where saved inputs are written. */
-    private File savedFailuresDirectory;
-
-    /** Set of saved inputs to fuzz. */
-    private ArrayList<Input> savedInputs = new ArrayList<>();
-
-    /** Queue of seeds to fuzz. */
-    private Deque<SeedInput> seedInputs = new ArrayDeque<>();
-
-    /** Current input that's running -- valid after getInput() and before handleResult(). */
-    private Input currentInput;
-
-    /** Index of currentInput in the savedInputs -- valid after seeds are processed (OK if this is inaccurate). */
-    private int currentParentInputIdx = 0;
-
-    /** Number of mutated inputs generated from currentInput. */
-    private int numChildrenGeneratedForCurrentParentInput = 0;
-
-    /** Number of cycles completed (i.e. how many times we've reset currentParentInputIdx to 0. */
-    private int cyclesCompleted = 0;
-
-    /** Number of favored inputs in the last cycle. */
-    private int numFavoredLastCycle = 0;
-
-    /** Number of saved inputs.
-     *
-     * This is usually the same as savedInputs.size(),
-     * but we do not really save inputs in TOTALLY_RANDOM mode.
-     */
-    private int numSavedInputs = 0;
-
-    /** Coverage statistics for a single run. */
-    private Coverage runCoverage = new Coverage();
-
-    /** Cumulative coverage statistics. */
-    private Coverage totalCoverage = new Coverage();
-
-    /** Cumulative coverage for valid inputs. */
-    private Coverage validCoverage = new Coverage();
-
-    /** The maximum number of keys covered by any single input found so far. */
-    private int maxCoverage = 0;
-
-    /** A mapping of coverage keys to inputs that are responsible for them. */
-    private Map<Object, Input> responsibleInputs = new HashMap<>(totalCoverage.size());
-
-    /** The set of unique failures found so far. */
-    Set<List<StackTraceElement>> uniqueFailures = new HashSet<>();
+    protected ExecutionIndexingState eiState;
 
     /**
      * A map of execution contexts (call stacks) to locations in saved inputs with those contexts.
@@ -176,123 +73,45 @@ public class ExecutionIndexingGuidance implements Guidance, TraceEventVisitor {
     private Map<ExecutionContext, ArrayList<InputLocation>> ecToInputLoc
             = new ProducerHashMap<>(() -> new ArrayList<>());
 
-    // ---------- LOGGING / STATS OUTPUT ------------
+    /** The thread being instrumented for coverage-guided fuzzing. */
+    protected Thread appThread;
 
-    /** Whether to print log statements to stderr (debug option; manually edit). */
-    private final boolean verbose = true;
+    /** The entry point to the test method we are fuzzing. */
+    protected String entryPoint;
 
-    /** A system console, which is non-null only if STDOUT is a console. */
-    private final Console console = System.console();
+    /** Whether the the entry point has been encountered in the current run. */
+    protected boolean testEntered;
 
-    /** Time since this guidance instance was created. */
-    private final Date startTime = new Date();
+    /** The last event handled by this guidance */
+    protected TraceEvent lastEvent;
 
-    /** Time at last stats refresh. */
-    private Date lastRefreshTime = startTime;
-
-    /** Total execs at last stats refresh. */
-    private long lastNumTrials = 0;
-
-    /** Minimum amount of time (in millis) between two stats refreshes. */
-    private static final long STATS_REFRESH_TIME_PERIOD = 300;
-
-    /** The file where log data is written. */
-    private File logFile;
-
-    /** The file where saved plot data is written. */
-    private File statsFile;
-
-    /** The currently executing input (for debugging purposes). */
-    private File currentInputFile;
-
-    /** Whether to print the fuzz config to the stats screen. */
-    private static boolean SHOW_CONFIG = false;
-
-    // ------------- TIMEOUT HANDLING ------------
-
-    /** Timeout for an individual run. */
-    private long singleRunTimeoutMillis;
-
-    /** Date when last run was started. */
-    private Date runStart;
-
-    /** Number of conditional jumps since last run was started. */
-    private long branchCount;
-
-    // ------------- FUZZING HEURISTICS ------------
-
-    /** Turn this on to disable all guidance (i.e. no mutations, only random fuzzing) */
-    static final boolean TOTALLY_RANDOM = Boolean.getBoolean("jqf.ei.TOTALLY_RANDOM");
-
-    /** Whether to use real execution indexes as opposed to flat numbering. */
-    static final boolean DISABLE_EXECUTION_INDEXING = !Boolean.getBoolean("jqf.ei.ENABLE_EXECUTION_INDEXING");
-
-    /** Whether to save only valid inputs **/
-    static final boolean SAVE_ONLY_VALID = Boolean.getBoolean("jqf.ei.SAVE_ONLY_VALID");
-
-    /** Max input size to generate. */
-    static final int MAX_INPUT_SIZE = Integer.getInteger("jqf.ei.MAX_INPUT_SIZE", 1024);
-
-    /** Whether to generate EOFs when we run out of bytes in the input, instead of randomly generating new bytes. **/
-    static final boolean GENERATE_EOF_WHEN_OUT = Boolean.getBoolean("jqf.ei.GENERATE_EOF_WHEN_OUT");
-
-    /** Baseline number of mutated children to produce from a given parent input. */
-    static final int NUM_CHILDREN_BASELINE = 50;
-
-    /** Multiplication factor for number of children to produce for favored inputs. */
-    static final int NUM_CHILDREN_MULTIPLIER_FAVORED = 20;
+    /** Maps a hash code of coverage bits to an index in savedInputs queue. */
+    protected Map<Integer, Integer> coverageHashToSavedInputIdx = new HashMap<>();
 
     /** Mean number of mutations to perform in each round. */
-    static final double MEAN_MUTATION_COUNT = 8.0;
+    static final double MEAN_MUTATION_COUNT = 2.0;
 
     /** Mean number of contiguous bytes to mutate in each mutation. */
     static final double MEAN_MUTATION_SIZE = 4.0; // Bytes
 
+    /** Probability that a standard mutation sets the byte to just zero instead of a random value. */
+    static final double MUTATION_ZERO_PROBABILITY = 0.05;
+
     /** Max number of contiguous bytes to splice in from another input during the splicing stage. */
     static final int MAX_SPLICE_SIZE = 64; // Bytes
-
 
     /** Whether to splice only in the same sub-tree */
     static final boolean SPLICE_SUBTREE = Boolean.getBoolean("jqf.ei.SPLICE_SUBTREE");
 
-    /** Whether to save inputs that only add new coverage bits (but no new responsibilities). */
-    static final boolean SAVE_NEW_COUNTS = true;
+    /** Probability of splicing in {@link MappedInput#fuzz(Random, Map)} */
+    static final double STANDARD_SPLICING_PROBABILITY = 0.0;
 
-    /** Whether to steal responsibility from old inputs (this increases computation cost). */
-    static final boolean STEAL_RESPONSIBILITY = Boolean.getBoolean("jqf.ei.STEAL_RESPONSIBILITY");
-
-    /** Probability of splicing in getOrGenerateFresh() */
-    static final double DEMAND_DRIVEN_SPLICING_PROBABILITY = 0;
-
+    /** Probability of splicing in {@link MappedInput#getOrGenerateFresh(ExecutionIndex, Random)}  */
+    static final double DEMAND_DRIVEN_SPLICING_PROBABILITY = 0.0;
 
     /**
-     * @param testName the name of test to display on the status screen
-     * Creates a new execution-index-parametric guidance.
+     * Constructs a new guidance instance.
      *
-     * @param duration the amount of time to run fuzzing for, where
-     *                 {@code null} indicates unlimited time.
-     * @param outputDirectory the directory where fuzzing results will be written
-     * @throws IOException if the output directory could not be prepared
-     */
-    public ExecutionIndexingGuidance(String testName, Duration duration, File outputDirectory) throws IOException {
-        this.testName = testName;
-        this.maxDurationMillis = duration != null ? duration.toMillis() : Long.MAX_VALUE;
-        this.outputDirectory = outputDirectory;
-        prepareOutputDirectory();
-
-        // Try to parse the single-run timeout
-        String timeout = System.getProperty("jqf.ei.TIMEOUT");
-        if (timeout != null && !timeout.isEmpty()) {
-            try {
-                // Interpret the timeout as milliseconds (just like `afl-fuzz -t`)
-                this.singleRunTimeoutMillis = Long.parseLong(timeout);
-            } catch (NumberFormatException e1) {
-                throw new IllegalArgumentException("Invalid timeout duration: " + timeout);
-            }
-        }
-    }
-
-    /**
      * @param testName the name of test to display on the status screen
      * @param duration the amount of time to run fuzzing for, where
      *                 {@code null} indicates unlimited time.
@@ -301,293 +120,56 @@ public class ExecutionIndexingGuidance implements Guidance, TraceEventVisitor {
      * @throws IOException if the output directory could not be prepared
      */
     public ExecutionIndexingGuidance(String testName, Duration duration, File outputDirectory, File... seedInputFiles) throws IOException {
-        this(testName, duration, outputDirectory);
+        super(testName, duration, outputDirectory);
         for (File seedInputFile : seedInputFiles) {
-            seedInputs.add(new SeedInput(seedInputFile));
+            seedInputs.add(new MappedSeedInput(seedInputFile));
         }
     }
 
-    private void prepareOutputDirectory() throws IOException {
 
-        // Create the output directory if it does not exist
-        if (!outputDirectory.exists()) {
-            if (!outputDirectory.mkdirs()) {
-                throw new IOException("Could not create output directory" +
-                        outputDirectory.getAbsolutePath());
-            }
-        }
-
-        // Make sure we can write to output directory
-        if (!outputDirectory.isDirectory() || !outputDirectory.canWrite()) {
-            throw new IOException("Output directory is not a writable directory: " +
-                    outputDirectory.getAbsolutePath());
-        }
-
-        // Name files and directories after AFL
-        this.savedInputsDirectory = new File(outputDirectory, "corpus");
-        this.savedInputsDirectory.mkdirs();
-        this.savedFailuresDirectory = new File(outputDirectory, "failures");
-        this.savedFailuresDirectory.mkdirs();
-        this.statsFile = new File(outputDirectory, "plot_data");
-        this.logFile = new File(outputDirectory, "fuzz.log");
-        this.currentInputFile = new File(outputDirectory, ".cur_input");
-
-
-        // Delete everything that we may have created in a previous run.
-        // Trying to stay away from recursive delete of parent output directory in case there was a
-        // typo and that was not a directory we wanted to nuke.
-        // We also do not check if the deletes are actually successful.
-        statsFile.delete();
-        logFile.delete();
-        for (File file : savedInputsDirectory.listFiles()) {
-            file.delete();
-        }
-        for (File file : savedFailuresDirectory.listFiles()) {
-            file.delete();
-        }
-
-        appendLineToFile(statsFile,"# unix_time, cycles_done, cur_path, paths_total, pending_total, " +
-                "pending_favs, map_size, unique_crashes, unique_hangs, max_depth, execs_per_sec, valid_inputs, invalid_inputs, valid_cov");
-
-
-    }
-
-    private void appendLineToFile(File file, String line) throws GuidanceException {
-        try (PrintWriter out = new PrintWriter(new FileWriter(file, true))) {
-            out.println(line);
-        } catch (IOException e) {
-            throw new GuidanceException(e);
-        }
-
-    }
-
-    private void infoLog(String str, Object... args) {
-        if (verbose) {
-            String line = String.format(str, args);
-            if (logFile != null) {
-                appendLineToFile(logFile, line);
-
-            } else {
-                System.err.println(line);
-            }
-        }
-    }
-
-    private String millisToDuration(long millis) {
-        long seconds = TimeUnit.MILLISECONDS.toSeconds(millis % TimeUnit.MINUTES.toMillis(1));
-        long minutes = TimeUnit.MILLISECONDS.toMinutes(millis % TimeUnit.HOURS.toMillis(1));
-        long hours = TimeUnit.MILLISECONDS.toHours(millis);
-        String result = "";
-        if (hours > 0) {
-            result = hours + "h ";
-        }
-        if (hours > 0 || minutes > 0) {
-            result += minutes + "m ";
-        }
-        result += seconds + "s";
-        return result;
-    }
-
-    // Call only if console exists
-    private void displayStats() {
-        assert (console != null);
-
-        Date now = new Date();
-        long intervalMilliseconds = now.getTime() - lastRefreshTime.getTime();
-        if (intervalMilliseconds < STATS_REFRESH_TIME_PERIOD) {
-            return;
-        }
-        long interlvalTrials = numTrials - lastNumTrials;
-        long intervalExecsPerSec = interlvalTrials * 1000L / intervalMilliseconds;
-        double intervalExecsPerSecDouble = interlvalTrials * 1000.0 / intervalMilliseconds;
-        lastRefreshTime = now;
-        lastNumTrials = numTrials;
-        long elapsedMilliseconds = now.getTime() - startTime.getTime();
-        long execsPerSec = numTrials * 1000L / elapsedMilliseconds;
-
-        String currentParentInputDesc;
-        if (seedInputs.size() > 0 || savedInputs.isEmpty()) {
-            currentParentInputDesc = "<seed>";
+    /** Returns the banner to be displayed on the status screen */
+    protected String getTitle() {
+        if (blind) {
+            return super.getTitle();
         } else {
-            Input currentParentInput = savedInputs.get(currentParentInputIdx);
-            currentParentInputDesc = currentParentInputIdx + " ";
-            currentParentInputDesc += currentParentInput.isFavored() ? "(favored)" : "(not favored)";
-            currentParentInputDesc += " {" + numChildrenGeneratedForCurrentParentInput +
-                    "/" + getTargetChildrenForParent(currentParentInput) + " mutations}";
+            return  "Semantic Fuzzing with Execution Indexes\n" +
+                    "---------------------------------------\n";
         }
-
-        int nonZeroCount = totalCoverage.getNonZeroCount();
-        double nonZeroFraction = nonZeroCount * 100.0 / totalCoverage.size();
-        int nonZeroValidCount = validCoverage.getNonZeroCount();
-        double nonZeroValidFraction = nonZeroValidCount * 100.0 / validCoverage.size();
-
-        console.printf("\033[2J");
-        console.printf("\033[H");
-        console.printf("JQF: Feedback-directed Generator-based Fuzzing\n");
-        console.printf("----------------------------------------------\n");
-        if (this.testName != null) {
-            console.printf("Test name:            %s\n", this.testName);
-        }
-        console.printf("Results directory:    %s\n", this.outputDirectory.getAbsolutePath());
-        if (SHOW_CONFIG) {
-            if (TOTALLY_RANDOM) {
-                console.printf("Config:               TOTALLY_RANDOM\n");
-            } else {
-                console.printf("Config:               DISABLE_EXECUTION_INDEXING = %s,\n" +
-                                "                      STEAL_RESPONSIBILITY       = %s,\n" +
-                                "                      SPLICE_SUBTREE             = %s\n\n",
-                        DISABLE_EXECUTION_INDEXING, STEAL_RESPONSIBILITY, SPLICE_SUBTREE);
-            }
-        }
-        console.printf("Elapsed time:         %s (%s)\n", millisToDuration(elapsedMilliseconds),
-                maxDurationMillis == Long.MAX_VALUE ? "no time limit" : ("max " + millisToDuration(maxDurationMillis)));
-        console.printf("Number of executions: %,d\n", numTrials);
-        console.printf("Valid inputs:         %,d (%.2f%%)\n", numValid, numValid*100.0/numTrials);
-        console.printf("Cycles completed:     %d\n", cyclesCompleted);
-        console.printf("Unique failures:      %,d\n", uniqueFailures.size());
-        console.printf("Queue size:           %,d (%,d favored last cycle)\n", savedInputs.size(), numFavoredLastCycle);
-        console.printf("Current parent input: %s\n", currentParentInputDesc);
-        console.printf("Execution speed:      %,d/sec now | %,d/sec overall\n", intervalExecsPerSec, execsPerSec);
-        console.printf("Total coverage:       %,d (%.2f%% of map)\n", nonZeroCount, nonZeroFraction);
-        console.printf("Valid coverage:       %,d (%.2f%% of map)\n", nonZeroValidCount, nonZeroValidFraction);
-
-        String plotData = String.format("%d, %d, %d, %d, %d, %d, %.2f%%, %d, %d, %d, %.2f, %d, %d, %.2f%%",
-                TimeUnit.MILLISECONDS.toSeconds(now.getTime()), cyclesCompleted, currentParentInputIdx,
-                savedInputs.size(), 0, 0, nonZeroFraction, uniqueFailures.size(), 0, 0, intervalExecsPerSecDouble,
-                numValid, numTrials-numValid, nonZeroValidFraction);
-        appendLineToFile(statsFile, plotData);
-
     }
 
-    private int getTargetChildrenForParent(Input parentInput) {
-        // Baseline is a constant
-        int target = NUM_CHILDREN_BASELINE;
-
-        // We like inputs that cover many things, so scale with fraction of max
-        if (maxCoverage > 0) {
-            target = (NUM_CHILDREN_BASELINE * parentInput.nonZeroCoverage) / maxCoverage;
-        }
-
-        // We absolutey love favored inputs, so fuzz them more
-        if (parentInput.isFavored()) {
-            target = target * NUM_CHILDREN_MULTIPLIER_FAVORED;
-        }
-
-        return target;
-    }
-
-    private void completeCycle() {
-        // Increment cycle count
-        cyclesCompleted++;
-        infoLog("\n# Cycle " + cyclesCompleted + " completed.");
-
-        // Go over all inputs and do a sanity check (plus log)
-        infoLog("Here is a list of favored inputs:");
-        int sumResponsibilities = 0;
-        numFavoredLastCycle = 0;
-        for (Input input : savedInputs) {
-            if (input.isFavored()) {
-                int responsibleFor = input.responsibilities.size();
-                infoLog("Input %d is responsible for %d branches", input.id, responsibleFor);
-                sumResponsibilities += responsibleFor;
-                numFavoredLastCycle++;
-            }
-        }
-        int totalCoverageCount = totalCoverage.getNonZeroCount();
-        infoLog("Total %d branches covered", totalCoverageCount);
-        if (sumResponsibilities != totalCoverageCount) {
-            throw new AssertionError("Responsibilty mistmatch");
-        }
-
-        // Refresh ecToInputLoc so that subsequent splices are only from favored inputs
-        ecToInputLoc.clear();
-        for (Input input : savedInputs) {
-            if (input.isFavored()) {
-                mapEcToInputLoc(input);
-            }
-        }
-
-        // Break log after cycle
-        infoLog("\n\n\n");
-    }
-
+    /** Spawns a new input from thin air (i.e., actually random) */
     @Override
-    public InputStream getInput() throws GuidanceException {
-        // Clear coverage stats for this run
-        runCoverage.clear();
+    protected Input<?> createFreshInput() {
+        return new MappedInput();
+    }
 
-        // Reset execution index state
-        eiState = new ExecutionIndexingState();
-
-        // Choose an input to execute based on state of queues
-        if (!seedInputs.isEmpty()) {
-            // First, if we have some specific seeds, use those
-            currentInput = seedInputs.removeFirst();
-
-            // Hopefully, the seeds will lead to new coverage and be added to saved inputs
-
-        } else if (savedInputs.isEmpty()) {
-            // If no seeds given try to start with something random
-            if (!TOTALLY_RANDOM && numTrials > 100_000) {
-                throw new GuidanceException("Too many trials without coverage; " +
-                        "likely all assumption violations");
-            }
-            currentInput = new Input();
-        } else {
-            // The number of children to produce is determined by how much of the coverage
-            // pool this parent input hits
-            Input currentParentInput = savedInputs.get(currentParentInputIdx);
-            int targetNumChildren = getTargetChildrenForParent(currentParentInput);
-            if (numChildrenGeneratedForCurrentParentInput >= targetNumChildren) {
-                // Select the next saved input to fuzz
-                currentParentInputIdx = (currentParentInputIdx + 1) % savedInputs.size();
-
-                // Count cycles
-                if (currentParentInputIdx == 0) {
-                    completeCycle();
-                }
-
-                numChildrenGeneratedForCurrentParentInput = 0;
-            }
-            Input parent = savedInputs.get(currentParentInputIdx);
-
-            // Fuzz it to get a new input
-            currentInput = parent.fuzz(random, ecToInputLoc);
-            numChildrenGeneratedForCurrentParentInput++;
-
-            // Write it to disk for debugging
-            try {
-                writeCurrentInputToFile(currentInputFile);
-            } catch (IOException ignore) { }
-
-            // Start time-counting for timeout handling
-            this.runStart = new Date();
-            this.branchCount = 0;
-        }
-
-
+    /**
+     * Returns an InputStream that delivers parameters to the generators.
+     *
+     * Note: The variable `currentInput` has been set to point to the input
+     * to mutate.
+     */
+    @Override
+    protected InputStream createParameterStream() {
         // Return an input stream that uses the EI map
         return new InputStream() {
-            int bytesRead = 0;
-
             @Override
             public int read() throws IOException {
 
                 // lastEvent must not be null
-                if (DISABLE_EXECUTION_INDEXING == false && lastEvent == null) {
-                    throw new IOException("Could not compute execution index; no instrumentation?");
+                if (lastEvent == null) {
+                    throw new GuidanceException("Could not compute execution index; no instrumentation?");
                 }
 
+                assert currentInput instanceof MappedInput : "This guidance should only mutate MappedInput(s)";
+
+                MappedInput mappedInput = (MappedInput) currentInput;
+
                 // Get the execution index of the last event
-                ExecutionIndex executionIndex = DISABLE_EXECUTION_INDEXING ?
-                        new ExecutionIndex(new int[]{0, bytesRead}) :
-                        eiState.getExecutionIndex(lastEvent);
+                ExecutionIndex executionIndex = eiState.getExecutionIndex(lastEvent);
 
                 // Attempt to get a value from the map, or else generate a random value
-                int value = currentInput.getOrGenerateFresh(executionIndex, random);
-
-                // Keep track of how many bytes were read in this input
-                bytesRead++;
+                int value = mappedInput.getOrGenerateFresh(executionIndex, random);
 
                 return value;
             }
@@ -595,264 +177,125 @@ public class ExecutionIndexingGuidance implements Guidance, TraceEventVisitor {
     }
 
     @Override
-    public boolean hasInput() {
-        Date now = new Date();
-        long elapsedMilliseconds = now.getTime() - startTime.getTime();
-        return elapsedMilliseconds < maxDurationMillis;
+    public InputStream getInput() throws GuidanceException {
+        // First, reset execution indexing state
+        eiState = new ExecutionIndexingState();
+
+        // Unmark "test started"
+        testEntered = false;
+
+        // Then, do the same logic as ZestGuidance (e.g. returning seeds, mutated inputs, or new input)
+        return super.getInput();
     }
 
+    /**
+     * Handles the result of a test execution.
+     *
+     * This method mostly delegates to the {@link ZestGuidance}, but additionally
+     * incorporates some custom logic to support minimization
+     */
     @Override
     public void handleResult(Result result, Throwable error) throws GuidanceException {
-        // Stop timeout handling
-        this.runStart = null;
+        int numSavedInputsBefore = savedInputs.size();
+        super.handleResult(result, error);
 
-        // Increment run count
-        this.numTrials++;
-
-        // Trim input (remove unused keys)
-        currentInput.gc();
-
-        // It must still be non-empty
-        assert(currentInput.valuesMap.size() > 0);
-
-        boolean valid = result == Result.SUCCESS;
-
-        if (valid) {
-            // Increment valid counter
-            numValid++;
-        }
-
-        if (result == Result.SUCCESS || result == Result.INVALID) {
-
-            // Coverage before
-            int nonZeroBefore = totalCoverage.getNonZeroCount();
-            int validNonZeroBefore = validCoverage.getNonZeroCount();
-
-            // Compute a list of keys for which this input can assume responsiblity.
-            // Newly covered branches are always included.
-            // Existing branches *may* be included, depending on the heuristics used.
-            // A valid input will steal responsibility from invalid inputs
-            Set<Object> responsibilities = computeResponsibilities(valid);
-
-            // Update total coverage
-            boolean coverageBitsUpdated = totalCoverage.updateBits(runCoverage);
-            if (valid) {
-                validCoverage.updateBits(runCoverage);
-            }
-
-            // Coverage after
-            int nonZeroAfter = totalCoverage.getNonZeroCount();
-            if (nonZeroAfter > maxCoverage) {
-                maxCoverage = nonZeroAfter;
-            }
-            int validNonZeroAfter = validCoverage.getNonZeroCount();
-
-            // Possibly save input
-            boolean toSave = false;
-            String why = "";
-
-
-            if (SAVE_NEW_COUNTS && coverageBitsUpdated) {
-                toSave = true;
-                why = why + "+count";
-            }
-
-            // Save if new total coverage found
-            if (nonZeroAfter > nonZeroBefore) {
-                // Must be responsible for some branch
-                assert(responsibilities.size() > 0);
-                toSave = true;
-                why = why + "+cov";
-            }
-
-            if (validNonZeroAfter > validNonZeroBefore) {
-                // Must be responsible for some branch
-                assert(responsibilities.size() > 0);
-                currentInput.valid = true;
-                toSave = true;
-                why = why + "+valid";
-            }
-
-            if (toSave) {
-
-                infoLog("Saving new input (at run %d): " +
-                                "input #%d " +
-                                "of size %d; " +
-                                "total coverage = %d",
-                        numTrials,
-                        savedInputs.size(),
-                        currentInput.valuesMap.size(),
-                        nonZeroAfter);
-
-                // Save input to queue and to disk
-                try {
-                    saveCurrentInput(responsibilities, why);
-                } catch (IOException e) {
-                    throw new GuidanceException(e);
-                }
-
-            }
-        } else if (result == Result.FAILURE || result == Result.TIMEOUT) {
-            String msg = error.getMessage();
-
-            // Get the root cause of the failure
-            Throwable rootCause = error;
-            while (rootCause.getCause() != null) {
-                rootCause = rootCause.getCause();
-            }
-
-            // Attempt to add this to the set of unique failures
-            if (uniqueFailures.add(Arrays.asList(rootCause.getStackTrace()))) {
-
-                // Save crash to disk
-                try {
-                    int crashIdx = uniqueFailures.size()-1;
-                    String saveFileName = String.format("id_%06d", crashIdx);
-                    File saveFile = new File(savedFailuresDirectory, saveFileName);
-                    writeCurrentInputToFile(saveFile);
-                    infoLog("%s","Found crash: " + error.getClass() + " - " + (msg != null ? msg : ""));
-                    String how = currentInput.desc;
-                    String why = result == Result.FAILURE ? "+crash" : "+hang";
-                    infoLog("Saved - %s %s %s", saveFile.getPath(), how, why);
-                } catch (IOException e) {
-                    throw new GuidanceException(e);
-                }
-
-            }
-        }
-
-        if (console != null) {
-            displayStats();
-        }
-
-    }
-
-
-    // Compute a set of branches for which the current input may assume responsibility
-    private Set<Object> computeResponsibilities(boolean valid) {
-        Set<Object> result = new HashSet<>();
-
-        // This input is responsible for all new coverage
-        Collection<?> newCoverage = runCoverage.computeNewCoverage(totalCoverage);
-        if (newCoverage.size() > 0) {
-            result.addAll(newCoverage);
-        }
-
-        // If valid, this input is responsible for all new valid coverage
-        if (valid) {
-            Collection<?> newValidCoverage = runCoverage.computeNewCoverage(validCoverage);
-            if (newValidCoverage.size() > 0) {
-                result.addAll(newValidCoverage);
-            }
-        }
-
-        // Perhaps it can also steal responsibility from other inputs
-        if (STEAL_RESPONSIBILITY) {
-            int currentNonZeroCoverage = runCoverage.getNonZeroCount();
-            int currentInputSize = currentInput.size();
-            Set<?> covered = new HashSet<>(runCoverage.getCovered());
-
-            // Search for a candidate to steal responsibility from
-            candidate_search:
-            for (Input candidate : savedInputs) {
-                Set<?> responsibilities = candidate.responsibilities;
-
-                // Candidates with no responsibility are not interesting
-                if (responsibilities.isEmpty()) {
-                    continue candidate_search;
-                }
-
-                // To avoid thrashing, only consider candidates with either
-                // (1) strictly smaller total coverage or
-                // (2) same total coverage but strictly larger size
-                if (candidate.nonZeroCoverage < currentNonZeroCoverage ||
-                        (candidate.nonZeroCoverage == currentNonZeroCoverage &&
-                                currentInputSize < candidate.size())) {
-
-                    // Check if we can steal all responsibilities from candidate
-                    for (Object b : responsibilities) {
-                        if (covered.contains(b) == false) {
-                            // Cannot steal if this input does not cover something
-                            // that the candidate is responsible for
-                            continue candidate_search;
-                        }
-                    }
-                    // If all of candidate's responsibilities are covered by the
-                    // current input, then it can completely subsume the candidate
-                    result.addAll(responsibilities);
-                }
-
-            }
-        }
-
-        return result;
-    }
-
-    private void writeCurrentInputToFile(File saveFile) throws IOException {
-        try (BufferedOutputStream out = new BufferedOutputStream(new FileOutputStream(saveFile))) {
-            for (Object key : currentInput.orderedKeys) {
-                int b = currentInput.valuesMap.get(key);
-                assert (b >= 0 && b < 256);
-                out.write(b);
-            }
-        }
-
-    }
-
-    private void saveCurrentInput(Set<Object> responsibilities, String why) throws IOException {
-
-        // First, save to disk (note: we issue IDs to everyone, but only write to disk  if valid)
-        int newInputIdx = numSavedInputs++;
-        String saveFileName = String.format("id_%06d", newInputIdx);
-        String how = currentInput.desc;
-        File saveFile = new File(savedInputsDirectory, saveFileName);
-        if (SAVE_ONLY_VALID == false || currentInput.valid) {
-            writeCurrentInputToFile(saveFile);
-            infoLog("Saved - %s %s %s", saveFile.getPath(), how, why);
-        }
-
-        // If not using guidance, do nothing else
-        if (TOTALLY_RANDOM) {
-            return;
-        }
-
-        // Second, save to queue
-        savedInputs.add(currentInput);
-
-        // Third, store basic book-keeping data
-        currentInput.id = newInputIdx;
-        currentInput.saveFile = saveFile;
-        currentInput.coverage = new Coverage(runCoverage);
-        currentInput.nonZeroCoverage = runCoverage.getNonZeroCount();
-        currentInput.offspring = 0;
-        savedInputs.get(currentParentInputIdx).offspring += 1;
-
-        // Fourth, assume responsibility for branches
-        currentInput.responsibilities = responsibilities;
-        for (Object b : responsibilities) {
-            // If there is an old input that is responsible,
-            // subsume it
-            Input oldResponsible = responsibleInputs.get(b);
-            if (oldResponsible != null) {
-                oldResponsible.responsibilities.remove(b);
-                infoLog("-- Stealing responsibility for %s from input %d", b, oldResponsible.id);
+        // Was this a good input?
+        if (result == Result.SUCCESS) {
+            // Get hash for the current run's coverage
+            int coverageHash = runCoverage.hashCode();
+            // Was this saved?
+            if (savedInputs.size() > numSavedInputsBefore) {
+                // If yes, map the hash to the last saved input index
+                assert numSavedInputsBefore == savedInputs.size() - 1 : "savedInputs can only grow by 1 at a time";
+                coverageHashToSavedInputIdx.put(coverageHash, numSavedInputsBefore);
             } else {
-                infoLog("-- Assuming new responsibility for %s", b);
+                // If the current input was not saved (maybe no new coverage),
+                // then see if it can replace an existing input with save coverage
+                if (coverageHashToSavedInputIdx.containsKey(coverageHash)) {
+                    int otherIdx = coverageHashToSavedInputIdx.get(coverageHash);
+                    Input<?> otherInput = savedInputs.get(otherIdx);
+
+                    // Let's compare input sizes of this input and the other input
+                    // But first, we need to run gc on the current input to get the right size
+                    currentInput.gc();
+
+                    if (otherInput != null && currentInput.size() < otherInput.size()) {
+                        // Bingo! We have the same coverage as someone else but smaller input size :-)
+                        infoLog("Minimzation successful! Replacing input %d with %s (size %d ==> %d bytes)",
+                                otherIdx, currentInput.desc, otherInput.size(), currentInput.size());
+
+                        // First, replace in saved inputs
+                        savedInputs.set(otherIdx, currentInput);
+
+                        // Second, update responsibilities
+                        for (Object b : otherInput.responsibilities) {
+                            // Subsume responsibility
+                            // infoLog("-- Stealing responsibility for %s from old input %d", b, otherIdx);
+                            // We are now responsible
+                            responsibleInputs.put(b, currentInput);
+                        }
+                        currentInput.responsibilities = otherInput.responsibilities;
+
+
+                        // Third, store basic book-keeping data
+                        currentInput.id = otherIdx;
+                        currentInput.saveFile = otherInput.saveFile;
+                        currentInput.coverage = new Coverage(runCoverage);
+                        currentInput.nonZeroCoverage = runCoverage.getNonZeroCount();
+                        currentInput.offspring = 0;
+                        savedInputs.get(currentParentInputIdx).offspring += 1;
+
+                        // Finally, overwrite the saved input file on disc
+                        try {
+                            writeCurrentInputToFile(currentInput.saveFile);
+                        } catch (IOException e) {
+                            throw new GuidanceException(e);
+                        }
+
+
+                        // Note: coverageHashToSavedInputIdx does not need to be updated, as the mapping is the same
+
+                    }
+                }
             }
-            // We are now responsible
-            responsibleInputs.put(b, currentInput);
         }
-
-        // Fifth, map executions to input locations for splicing
-        mapEcToInputLoc(currentInput);
-
     }
+
+
+    /** Saves an interesting input to the queue. */
+    @Override
+    protected void saveCurrentInput(Set<Object> responsibilities, String why) throws IOException {
+        // First, do same as Zest
+        super.saveCurrentInput(responsibilities, why);
+
+        // Then, map executions to input locations for splicing
+        mapEcToInputLoc(currentInput);
+    }
+
+    /** Handles the end of fuzzing cycle (i.e., having gone through the entire queue) */
+    @Override
+    protected void completeCycle() {
+        // First, do same as Zest
+        super.completeCycle();
+
+        // Then, refresh ecToInputLoc so that subsequent splices are only from favored inputs
+        ecToInputLoc.clear();
+        for (Input input : savedInputs) {
+            if (input.isFavored()) {
+                mapEcToInputLoc(input);
+            }
+        }
+    }
+
 
     private void mapEcToInputLoc(Input input) {
-        for (int offset = 0; offset < input.size(); offset++) {
-            ExecutionIndex ei = input.orderedKeys.get(offset);
-            ExecutionContext ec = new ExecutionContext(ei);
-            ecToInputLoc.get(ec).add(new InputLocation(input, offset));
+        if (input instanceof MappedInput) {
+            MappedInput mappedInput = (MappedInput) input;
+            for (int offset = 0; offset < mappedInput.size(); offset++) {
+                ExecutionIndex ei = mappedInput.orderedKeys.get(offset);
+                ExecutionContext ec = new ExecutionContext(ei);
+                ecToInputLoc.get(ec).add(new InputLocation(mappedInput, offset));
+            }
         }
 
     }
@@ -862,50 +305,44 @@ public class ExecutionIndexingGuidance implements Guidance, TraceEventVisitor {
     public Consumer<TraceEvent> generateCallBack(Thread thread) {
         if (appThread != null) {
             throw new IllegalStateException(ExecutionIndexingGuidance.class +
-                " only supports single-threaded apps at the moment");
+                    " only supports single-threaded apps at the moment");
         }
         appThread = thread;
+        entryPoint = SingleSnoop.entryPoints.get(thread).replace('.', '/');
+        assert entryPoint != null : ExecutionIndexingGuidance.class + " must be able to determine an entry point";
 
         return this::handleEvent;
+
     }
 
-    private void handleEvent(TraceEvent e) {
+    /** Handles a trace event generated during test execution */
+    @Override
+    protected void handleEvent(TraceEvent e) {
         // Set last event to this event
         lastEvent = e;
 
-        // Update execution indexing logic
-        if (!DISABLE_EXECUTION_INDEXING) {
-            e.applyVisitor(this);
-        }
+        // Update execution indexing logic regardless of whether we are in generator or test method
+        e.applyVisitor(eiState);
 
-        // Collect totalCoverage
-        runCoverage.handleEvent(e);
-        // Check for possible timeouts every so often
-        if (this.singleRunTimeoutMillis > 0 &&
-                this.runStart != null && (++this.branchCount) % 10_000 == 0) {
-            long elapsed = new Date().getTime() - runStart.getTime();
-            if (elapsed > this.singleRunTimeoutMillis) {
-                throw new TimeoutException(elapsed, this.singleRunTimeoutMillis);
+        // Do not handle code coverage unless test has been entered
+        if (!testEntered) {
+            // Check if this event enters the test method
+            if (e instanceof CallEvent) {
+                CallEvent callEvent = (CallEvent) e;
+                if (callEvent.getInvokedMethodName().startsWith(entryPoint)) {
+                    testEntered = true;
+                }
+            }
+
+            // If test method has not yet been entered, then ignore code coverage
+            if (!testEntered) {
+                return;
             }
         }
-    }
 
-    @Override
-    public void visitCallEvent(CallEvent c) {
-        eiState.pushCall(c);
-    }
+        // Delegate to ZestGuidance for handling code coverage
+        super.handleEvent(e);
 
-    @Override
-    public void visitReturnEvent(ReturnEvent r) {
-        eiState.popReturn(r);
-    }
-
-    /**
-     * Returns a reference to the coverage statistics.
-     * @return a reference to the coverage statistics
-     */
-    public Coverage getTotalCoverage() {
-        return totalCoverage;
     }
 
 
@@ -922,7 +359,17 @@ public class ExecutionIndexingGuidance implements Guidance, TraceEventVisitor {
      * an input is via the {@link #fuzz} method which produces a new input
      * object with some values mutated.</p>
      */
-    public static class Input {
+    public class MappedInput extends Input<ExecutionIndex> {
+
+        /**
+         * Whether this input has been executed.
+         *
+         * When this field is {@code false}, the field {@link #orderedKeys}
+         * is not yet populated and must not be used. When this field is {@code true},
+         * the input should be considered immutable and neither {@link #orderedKeys} nor
+         * {@link #valuesMap} must be modified.
+         */
+        protected boolean executed = false;
 
         /** A map from execution indexes to the byte (0-255) to be returned at that index. */
         protected LinkedHashMap<ExecutionIndex, Integer> valuesMap;
@@ -938,90 +385,15 @@ public class ExecutionIndexingGuidance implements Guidance, TraceEventVisitor {
          */
         protected ArrayList<ExecutionIndex> orderedKeys = new ArrayList<>();
 
-        /**
-         * Whether this input has been executed.
-         *
-         * When this field is {@code false}, the field {@link #orderedKeys}
-         * is not yet populated and must not be used. When this field is {@code true},
-         * the input should be considered immutable and neither {@link #orderedKeys} nor
-         * {@link #valuesMap} must be modified.
-         */
-        protected boolean executed = false;
-
-        /**
-         * The file where this input is saved.
-         *
-         * <p>This field is null for inputs that are not saved.</p>
-         */
-        private File saveFile = null;
-
-        /**
-         * An ID for a saved input.
-         *
-         * <p>This field is -1 for inputs that are not saved.</p>
-         */
-        private int id;
-
-        /**
-         * The description for this input.
-         *
-         * <p>This field is modified by the construction and mutation
-         * operations.</p>
-         */
-        protected String desc;
-
-        /**
-         * The run coverage for this input, if the input is saved.
-         *
-         * <p>This field is null for inputs that are not saved.</p>
-         */
-        private Coverage coverage = null;
-
-        /**
-         * The number of non-zero elements in `coverage`.
-         *
-         * <p>This field is -1 for inputs that are not saved.</p>
-         *
-         * <p></p>When this field is non-negative, the information is
-         * redundant (can be computed using {@link Coverage#getNonZeroCount()}),
-         * but we store it here for performance reasons.</p>
-         */
-        private int nonZeroCoverage = -1;
-
-        /**
-         * The number of mutant children spawned from this input that
-         * were saved.
-         *
-         * <p>This field is -1 for inputs that are not saved.</p>
-         */
-        private int offspring = -1;
-
-        /**
-         * Whether this input resulted in a valid run.
-         */
-        private boolean valid = false;
-
-        /**
-         * The set of coverage keys for which this input is
-         * responsible.
-         *
-         * <p>This field is null for inputs that are not saved.</p>
-         *
-         * <p>Each coverage key appears in the responsibility set
-         * of exactly one saved input, and all covered keys appear
-         * in at least some responsibility set. Hence, this list
-         * needs to be kept in-sync with {@link #responsibleInputs}.</p>
-         */
-        private Set<Object> responsibilities = null;
 
         private List<InputPrefixMapping> demandDrivenSpliceMap = new ArrayList<>();
 
         /**
          * Create an empty input map.
          */
-        public Input() {
+        public MappedInput() {
+            super();
             valuesMap = new LinkedHashMap<>();
-            desc = "random";
         }
 
         /**
@@ -1029,9 +401,9 @@ public class ExecutionIndexingGuidance implements Guidance, TraceEventVisitor {
          *
          * @param toClone the input map to clone
          */
-        public Input(Input toClone) {
+        public MappedInput(MappedInput toClone) {
+            super(toClone);
             valuesMap = new LinkedHashMap<>(toClone.valuesMap);
-            desc = String.format("src:%06d", toClone.id);
         }
 
         /**
@@ -1055,7 +427,7 @@ public class ExecutionIndexingGuidance implements Guidance, TraceEventVisitor {
          * @throws IllegalStateException if this method is called before the input
          *                               has been executed
          */
-        public final int getValueAtOffset(int offset) throws IndexOutOfBoundsException, IllegalStateException {
+        private final int getValueAtOffset(int offset) throws IndexOutOfBoundsException, IllegalStateException {
             if (!executed) {
                 throw new IllegalStateException("Cannot get with offset before execution");
             }
@@ -1077,7 +449,7 @@ public class ExecutionIndexingGuidance implements Guidance, TraceEventVisitor {
          * @throws IllegalStateException if this method is called before the input
          *                               has been executed
          */
-        public final ExecutionIndex getKeyAtOffset(int offset) throws IndexOutOfBoundsException, IllegalStateException {
+        private final ExecutionIndex getKeyAtOffset(int offset) throws IndexOutOfBoundsException, IllegalStateException {
             if (!executed) {
                 throw new IllegalStateException("Cannot get with offset before execution");
             }
@@ -1106,6 +478,7 @@ public class ExecutionIndexingGuidance implements Guidance, TraceEventVisitor {
          * @throws IllegalStateException if this method is called after the input
          *                               has been executed
          */
+        @Override
         public int getOrGenerateFresh(ExecutionIndex key, Random random) throws IllegalStateException {
             if (executed) {
                 throw new IllegalStateException("Cannot generate fresh values after execution");
@@ -1172,7 +545,7 @@ public class ExecutionIndexingGuidance implements Guidance, TraceEventVisitor {
          * @throws IndexOutOfBoundsException if the offset is negative or
          *      larger than {@link #size}()-1
          */
-        public final Integer getValueAtKey(ExecutionIndex ei) throws IndexOutOfBoundsException {
+        protected final Integer getValueAtKey(ExecutionIndex ei) throws IndexOutOfBoundsException {
             return valuesMap.get(ei);
         }
 
@@ -1187,7 +560,7 @@ public class ExecutionIndexingGuidance implements Guidance, TraceEventVisitor {
          * @throws IllegalStateException if this method is called after the input
          *                               has been executed
          */
-        public final void setValueAtKey(ExecutionIndex ei, int val) throws IndexOutOfBoundsException, IllegalStateException {
+        protected final void setValueAtKey(ExecutionIndex ei, int val) throws IndexOutOfBoundsException, IllegalStateException {
             if (executed) {
                 throw new IllegalStateException("Cannot set value before execution");
             }
@@ -1203,17 +576,30 @@ public class ExecutionIndexingGuidance implements Guidance, TraceEventVisitor {
          * not be externally visible (at least as long as the test executions are
          * deterministic).</p>
          */
+        @Override
         public void gc() {
             LinkedHashMap<ExecutionIndex, Integer> newMap = new LinkedHashMap<>();
             for (ExecutionIndex key : orderedKeys) {
                 newMap.put(key, valuesMap.get(key));
             }
             valuesMap = newMap;
+            assert valuesMap.size() == orderedKeys.size() : "valuesMap and orderedKeys must be of same size";
 
             // Set the `executed` flag
             executed = true;
         }
 
+        /**
+         * Return a new input derived from this one with some values
+         * mutated.
+         *
+         * Pass-through to {@link #fuzz(Random, Map)}
+         *
+         */
+        @Override
+        public Input fuzz(Random random) {
+            return fuzz(random, ExecutionIndexingGuidance.this.ecToInputLoc);
+        }
 
         /**
          * Return a new input derived from this one with some values
@@ -1236,22 +622,19 @@ public class ExecutionIndexingGuidance implements Guidance, TraceEventVisitor {
          * {@link #MAX_SPLICE_SIZE}.</p>
          *
          * @param random the PRNG
-         * @param ecToInputLoc a map of execution contexts to input locations
          * @return a newly fuzzed input
          */
-        public Input fuzz(Random random, Map<ExecutionContext, ArrayList<InputLocation>> ecToInputLoc) {
+        protected MappedInput fuzz(Random random, Map<ExecutionContext, ArrayList<InputLocation>> ecToInputLoc) {
             // Derive new input from this object as source
-            Input newInput = new Input(this);
+            MappedInput newInput = new MappedInput(this);
 
             // Maybe try splicing
             boolean splicingDone = false;
 
-
             // Only splice if we have been provided the ecToInputLoc
             if (ecToInputLoc != null) {
 
-                // TODO: Do we really want splicing to be this frequent?
-                if (random.nextBoolean()) {
+                if (random.nextDouble() < STANDARD_SPLICING_PROBABILITY) {
                     final int MIN_TARGET_ATTEMPTS = 3;
                     final int MAX_TARGET_ATTEMPTS = 6;
 
@@ -1285,7 +668,7 @@ public class ExecutionIndexingGuidance implements Guidance, TraceEventVisitor {
 
                             // Get a candidate source location with the same execution context
                             inputLocation = inputLocations.get(random.nextInt(inputLocations.size()));
-                            Input sourceInput = inputLocation.input;
+                            MappedInput sourceInput = inputLocation.input;
                             int sourceOffset = inputLocation.offset;
 
 
@@ -1300,7 +683,7 @@ public class ExecutionIndexingGuidance implements Guidance, TraceEventVisitor {
                             }
 
                             int splicedBytes = 0;
-                            if (!DISABLE_EXECUTION_INDEXING && SPLICE_SUBTREE) {
+                            if (SPLICE_SUBTREE) {
                                 // Do not splice if there is no common suffix between EI of source and target
                                 ExecutionIndex sourceEi = sourceInput.getKeyAtOffset(sourceOffset);
                                 Suffix suffix = targetEi.getCommonSuffix(sourceEi);
@@ -1365,27 +748,40 @@ public class ExecutionIndexingGuidance implements Guidance, TraceEventVisitor {
                 int numMutations = sampleGeometric(random, MEAN_MUTATION_COUNT);
                 newInput.desc += ",havoc:"+numMutations;
 
-                boolean setToZero = random.nextDouble() < 0.1; // one out of 10 times
-
                 for (int mutation = 1; mutation <= numMutations; mutation++) {
 
                     // Select a random offset and size
                     int offset = random.nextInt(newInput.valuesMap.size());
                     int mutationSize = sampleGeometric(random, MEAN_MUTATION_SIZE);
+                    // infoLog("[%d] Mutating %d bytes at offset %d", mutation, mutationSize, offset);
 
-                    // desc += String.format(":%d@%d", mutationSize, idx);
+                    newInput.desc += String.format("(%d@%d)", mutationSize, offset);
+
+                    boolean setToZero = random.nextDouble() < MUTATION_ZERO_PROBABILITY; // one out of 10 times
+                    if (setToZero) {
+                        newInput.desc += "=0";
+                    }
 
                     // Iterate over all entries in the value map
                     Iterator<Map.Entry<ExecutionIndex, Integer>> entryIterator
                             = newInput.valuesMap.entrySet().iterator();
+                    ExecutionContext ecToMutate = null;
                     for (int i = 0; entryIterator.hasNext(); i++) {
                         Map.Entry<ExecutionIndex, Integer> e = entryIterator.next();
                         // Only mutate `mutationSize` contiguous entries from
                         // the randomly selected `idx`.
                         if (i >= offset && i < (offset + mutationSize)) {
+                            ExecutionContext currentEc = new ExecutionContext(e.getKey());
+                            if (ecToMutate == null) {
+                                ecToMutate = currentEc;
+                            } else if (!ecToMutate.equals(currentEc)) {
+                                break;
+                            }
+                            // infoLog("Mutating: %s", e.getKey());
                             // Apply a random mutation
                             int mutatedValue = setToZero ? 0 : random.nextInt(256);
                             e.setValue(mutatedValue);
+
                         }
                     }
                 }
@@ -1395,31 +791,53 @@ public class ExecutionIndexingGuidance implements Guidance, TraceEventVisitor {
 
         }
 
-        /**
-         * Returns whether this input should be favored for fuzzing.
-         *
-         * <p>An input is favored if it is responsible for covering
-         * at least one branch.</p>
-         *
-         * @return
-         */
-        public boolean isFavored() {
-            return responsibilities.size() > 0;
-        }
+        @Override
+        public Iterator<Integer> iterator() {
+            return new Iterator<Integer>() {
 
-        private int sampleGeometric(Random random, double mean) {
-            double p = 1 / mean;
-            double uniform = random.nextDouble();
-            return (int) ceil(log(1 - uniform) / log(1 - p));
-        }
+                Iterator<ExecutionIndex> keyIt = orderedKeys.iterator();
 
+                @Override
+                public boolean hasNext() {
+                    return keyIt.hasNext();
+                }
+
+                @Override
+                public Integer next() {
+                    return valuesMap.get(keyIt.next());
+                }
+            };
+        }
     }
 
-    public static class SeedInput extends Input {
+    static class InputLocation {
+        private final MappedInput input;
+        private final int offset;
+
+        InputLocation(MappedInput input, int offset) {
+            this.input = input;
+            this.offset = offset;
+        }
+    }
+
+    static class InputPrefixMapping {
+        private final MappedInput sourceInput;
+        private final Prefix sourcePrefix;
+        private final Prefix targetPrefix;
+
+        InputPrefixMapping(MappedInput sourceInput, Prefix sourcePrefix, Prefix targetPrefix) {
+            this.sourceInput = sourceInput;
+            this.sourcePrefix = sourcePrefix;
+            this.targetPrefix = targetPrefix;
+        }
+    }
+
+    public class MappedSeedInput extends MappedInput {
         final File seedFile;
         final InputStream in;
 
-        public SeedInput(File seedFile) throws IOException {
+        public MappedSeedInput(File seedFile) throws IOException {
+            super();
             this.seedFile = seedFile;
             this.in = new BufferedInputStream(new FileInputStream(seedFile));
             this.desc = "seed";
@@ -1434,15 +852,32 @@ public class ExecutionIndexingGuidance implements Guidance, TraceEventVisitor {
                 throw new GuidanceException("Error reading from seed file: " + seedFile.getName(), e);
 
             }
-            if (value >= 0) {
-                valuesMap.put(key, value);
-                orderedKeys.add(key);
+
+            // Check for EOF (ideally, should not happen since generators are expected to be deterministic)
+            if (value == -1) {
+                // Bail if configured to do so
+                if (GENERATE_EOF_WHEN_OUT) {
+                    // Returned as EOF but not added to the map
+                    return -1;
+                }
+
+                // More commonly, generate a random value
+                value = random.nextInt(256);
             }
+
+            // Populate the value map
+            orderedKeys.add(key);
+            valuesMap.put(key, value);
+
             return value;
         }
 
         @Override
         public void gc() {
+            // Set the `executed` flag
+            executed = true;
+
+            // Close the seed file
             try {
                 in.close();
             } catch (IOException e) {
@@ -1450,29 +885,6 @@ public class ExecutionIndexingGuidance implements Guidance, TraceEventVisitor {
             }
         }
 
-    }
-
-
-    static class InputLocation {
-        private final Input input;
-        private final int offset;
-
-        InputLocation(Input input, int offset) {
-            this.input = input;
-            this.offset = offset;
-        }
-    }
-
-    static class InputPrefixMapping {
-        private final Input sourceInput;
-        private final Prefix sourcePrefix;
-        private final Prefix targetPrefix;
-
-        InputPrefixMapping(Input sourceInput, Prefix sourcePrefix, Prefix targetPrefix) {
-            this.sourceInput = sourceInput;
-            this.sourcePrefix = sourcePrefix;
-            this.targetPrefix = targetPrefix;
-        }
     }
 
 }

@@ -32,17 +32,18 @@ package edu.berkeley.cs.jqf.fuzz.ei;
 import java.io.File;
 
 import edu.berkeley.cs.jqf.fuzz.junit.GuidedFuzzing;
+import org.junit.runner.Result;
 
 /**
- * Entry point for fuzzing with Execution Indexing.
+ * Entry point for fuzzing with Zest.
  *
  * @author Rohan Padhye
  */
-public class ExecutionIndexingDriver {
+public class ZestDriver {
 
     public static void main(String[] args) {
         if (args.length < 2){
-            System.err.println("Usage: java " + ExecutionIndexingDriver.class + " TEST_CLASS TEST_METHOD [OUTPUT_DIR [SEEDS...]]");
+            System.err.println("Usage: java " + ZestDriver.class + " TEST_CLASS TEST_METHOD [OUTPUT_DIR [SEEDS...]]");
             System.exit(1);
         }
 
@@ -62,17 +63,17 @@ public class ExecutionIndexingDriver {
             // Load the guidance
             String title = testClassName+"#"+testMethodName;
             ZestGuidance guidance = seedFiles != null ?
-                    new ExecutionIndexingGuidance(title, null, outputDirectory, seedFiles) :
-                    new ExecutionIndexingGuidance(title, null, outputDirectory, new File[]{});
-
-            // Ensure that generators are being traced
-            System.setProperty("jqf.traceGenerators", "true");
+                    new ZestGuidance(title, null, outputDirectory, seedFiles) :
+                    new ZestGuidance(title, null, outputDirectory);
 
             // Run the Junit test
-            GuidedFuzzing.run(testClassName, testMethodName, guidance, System.out);
+            Result res = GuidedFuzzing.run(testClassName, testMethodName, guidance, System.out);
             if (Boolean.getBoolean("jqf.logCoverage")) {
                 System.out.println(String.format("Covered %d edges.",
                         guidance.getTotalCoverage().getNonZeroCount()));
+            }
+            if (Boolean.getBoolean("jqf.ei.EXIT_ON_CRASH") && !res.wasSuccessful()) {
+                System.exit(3);
             }
 
         } catch (Exception e) {

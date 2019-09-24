@@ -1,5 +1,5 @@
 /*
- * Copyright (c) 2017-2018 The Regents of the University of California
+ * Copyright (c) 2019, The Regents of the University of California
  *
  * All rights reserved.
  *
@@ -26,36 +26,47 @@
  * (INCLUDING NEGLIGENCE OR OTHERWISE) ARISING IN ANY WAY OUT OF THE USE
  * OF THIS SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
  */
-package edu.berkeley.cs.jqf.examples.common;
+package edu.berkeley.cs.jqf.examples.commons;
 
-import java.io.IOException;
-import java.io.InputStream;
+import java.util.HashMap;
+import java.util.Map;
 
-import com.pholser.junit.quickcheck.generator.GenerationStatus;
-import com.pholser.junit.quickcheck.generator.Generator;
-import com.pholser.junit.quickcheck.random.SourceOfRandomness;
+import edu.berkeley.cs.jqf.fuzz.Fuzz;
+import edu.berkeley.cs.jqf.fuzz.JQF;
+import org.apache.commons.collections4.Trie;
+import org.apache.commons.collections4.trie.PatriciaTrie;
+import org.junit.runner.RunWith;
+
+import static org.junit.Assert.assertTrue;
+import static org.junit.Assume.assumeTrue;
 
 /**
  * @author Rohan Padhye
  */
-public class InputStreamGenerator extends Generator<InputStream> {
-    public InputStreamGenerator() {
-        super(InputStream.class);
+@RunWith(JQF.class)
+public class PatriciaTrieTest {
+
+    @Fuzz
+    public void testPrefixMap(HashMap<String, Integer> map, String prefix) {
+        assumeTrue(prefix.length() > 0);
+        // Create new trie with input `map`
+        PatriciaTrie trie = new PatriciaTrie(map);
+        // Get sub-map whose keys start with `prefix`
+        Map prefixMap = trie.prefixMap(prefix);
+        // Ensure that it contains all keys that start with `prefix`
+        for (String key : map.keySet()) {
+            if (key.startsWith(prefix)) {
+                assertTrue(prefixMap.containsKey(key));
+            }
+        }
     }
 
-    @Override
-    public InputStream generate(SourceOfRandomness sourceOfRandomness, GenerationStatus generationStatus) {
-        return new InputStream() {
-           @Override
-           public int read() throws IOException {
-               try {
-                   byte nextByte = sourceOfRandomness.nextByte(Byte.MIN_VALUE, Byte.MAX_VALUE);
-                   int nextInt = nextByte & 0xFF;
-                   return nextInt;
-               } catch (IllegalStateException e) {
-                   return -1;
-               }
-           }
-       };
+    @Fuzz
+    public void testCopy(Map<String, Integer> map, String key) {
+        assumeTrue(map.containsKey(key));
+        // Create new trie with input `map`
+        Trie trie = new PatriciaTrie(map);
+        // The key should exist in the trie as well
+        assertTrue(trie.containsKey(key));
     }
 }

@@ -92,7 +92,7 @@ public class ReproGoal extends AbstractMojo {
     private String testMethod;
 
     /**
-     * Input file to reproduce.
+     * Input file or directory to reproduce test case(s).
      *
      * <p>These files will typically be taken from the test corpus
      * ("queue") directory or the failures ("crashes") directory
@@ -138,6 +138,22 @@ public class ReproGoal extends AbstractMojo {
     @Parameter(property="includes")
     private String includes;
 
+    /**
+     * Whether to print the args to each test case.
+     *
+     * <p>The input file being repro'd is usually a sequence of bytes
+     * that is decoded by the junit-quickcheck generators corresponding
+     * to the parameters declared in the test method. Unless the test method
+     * contains just one arg of type InputStream, the input file itself
+     * does not directly correspond to the args sent to the test method.</p>
+     *
+     * <p>If this file is set, then the args decoded from a repro'd input
+     * file are first printed to standard output before invoking the test
+     * method.</p>
+     */
+    @Parameter(property="printArgs")
+    private boolean printArgs;
+
     @Override
     public void execute() throws MojoExecutionException, MojoFailureException {
         ClassLoader loader;
@@ -164,18 +180,26 @@ public class ReproGoal extends AbstractMojo {
             throw new MojoExecutionException("Could not get project classpath", e);
         }
 
-        File inputFile = new File(input);
-        if (!inputFile.exists() || !inputFile.canRead()) {
-            throw new MojoExecutionException("Cannot find or open file " + input);
-        }
-
         // If a coverage dump file was provided, enable logging via system property
         if (logCoverage != null) {
             System.setProperty("jqf.repro.logUniqueBranches", "true");
         }
 
+        // If args should be printed, set system property
+        if (printArgs) {
+            System.setProperty("jqf.repro.printArgs", "true");
+        }
 
-        guidance = new ReproGuidance(inputFile, null);
+        File inputFile = new File(input);
+        if (!inputFile.exists() || !inputFile.canRead()) {
+            throw new MojoExecutionException("Cannot find or open file " + input);
+        }
+
+        if (inputFile.isDirectory()) {
+            guidance = new ReproGuidance(inputFile.listFiles(), null);
+        } else {
+            guidance = new ReproGuidance(inputFile, null);
+        }
 
         try {
             result = GuidedFuzzing.run(testClassName, testMethod, loader, guidance, out);

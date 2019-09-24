@@ -9,7 +9,7 @@ ROOT_DIR=`dirname $SCRIPT_DIR`
 
 # Find JQF classes and JARs
 project="jqf"
-version="1.0-beta-2-SNAPSHOT"
+version="1.4-SNAPSHOT"
 
 FUZZ_DIR="${ROOT_DIR}/fuzz/target/"
 INST_DIR="${ROOT_DIR}/instrument/target/"
@@ -28,9 +28,7 @@ if [ -z "${CLASSPATH}" ]; then
 fi  
 
 # Java Agent config (can be turned off using env var)
-if [ -n "$JQF_DISABLE_INSTRUMENTATION" ]; then
-  JAVAAGENT=""
-else
+if [ -z "$JQF_DISABLE_INSTRUMENTATION" ]; then
   JAVAAGENT="-javaagent:${INST_JAR}"
 fi
 
